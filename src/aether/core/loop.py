@@ -25,6 +25,7 @@ from aether.core.security import (
     is_command_blacklisted,
 )
 from aether.memory.manager import MemoryManager
+from aether.skills.manager import SkillManager
 from aether.tools.terminal import TerminalTool
 from aether.tools.file import FileTools
 
@@ -165,6 +166,8 @@ class AgentLoop:
         self.breakers = BreakerRegistry()
         self.approval = ApprovalManager(config.security)
         self.memory = MemoryManager(max_entries=config.memory.max_entries)
+        self.skills = SkillManager()
+        self.skills.discover()
         self._step_count = 0
         self._pending_approvals: dict[str, Any] = {}
 
@@ -221,17 +224,31 @@ class AgentLoop:
         if relevant_memories:
             memory_lines = [f"- {m.content}" for m in relevant_memories]
             memory_context = (
-                "\n\nRelevant memories from past conversations:\n"
+                "\n\nRelevant memories:\n"
                 + "\n".join(memory_lines)
-                + "\n\nUse these to personalize your response. "
-                "If the user shares a new preference or fact worth remembering, "
-                "say 'I'll remember that' and it will be saved automatically."
+                + "\n\nUse these to personalize your response."
+            )
+
+        # ── Match and inject relevant skills ──
+        matched_skills = self.skills.match_triggers(user_message)
+        skill_context = ""
+        if matched_skills:
+            skill_lines = []
+            for s in matched_skills[:3]:  # Top 3
+                body_preview = s.body[:800]  # Limit skill content
+                skill_lines.append(
+                    f"### {s.meta.name}: {s.meta.description}\n{body_preview}"
+                )
+            skill_context = (
+                "\n\nRelevant skills loaded:\n"
+                + "\n---\n".join(skill_lines)
+                + "\n\nFollow these skill instructions when applicable."
             )
         tool_list = "\n".join(
             f"- {name}: {tool.description}" for name, tool in self.tools.items()
         )
         full_system = (
-            f"{sys_prompt}{memory_context}\n\n"
+            f"{sys_prompt}{memory_context}{skill_context}\n\n"
             f"Available tools:\n{tool_list}\n\n"
             "When you need a tool, respond with a JSON function call.\n"
             "When done, respond normally."

@@ -53,6 +53,11 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
                 elif cmd == "tools":
                     for name, tool in loop.tools.items():
                         console.print(f"  {name}: {tool.description[:80]}")
+                elif cmd == "skills":
+                    skills = loop.skills.list_all()
+                    console.print(f"[bold]Skills ({len(skills)}):[/bold]")
+                    for s in skills:
+                        console.print(f"  [bold]{s.name}[/bold] [{s.category}]: {s.description[:60]}")
                 elif cmd == "breakers":
                     for s in loop.breakers.status_all():
                         color = "red" if s["state"] == "open" else "green"

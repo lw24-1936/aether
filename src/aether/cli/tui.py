@@ -299,6 +299,23 @@ class AetherTUI(App):
                     log.write("\n[bold]Recent:[/bold]")
                     for r in recent:
                         log.write(f"  [dim]{r.target}[/dim]: {r.content[:80]}")
+        elif cmd == "skills":
+            if self._loop:
+                all_skills = self._loop.skills.list_all()
+                log.write(f"[bold]Skills ({len(all_skills)}):[/bold]")
+                for s in all_skills:
+                    triggers = ", ".join(s.triggers[:3])
+                    log.write(f"  [bold]{s.name}[/bold] [{s.category}] {s.description[:60]}")
+                    log.write(f"    [dim]triggers: {triggers}[/dim]")
+        elif cmd.startswith("skill "):
+            if self._loop:
+                name = text[6:].strip()  # After "/skill "
+                skill = self._loop.skills.load(name)
+                if skill:
+                    log.write(f"[bold]{skill.meta.name}[/bold] v{skill.meta.version}")
+                    log.write(f"[dim]{skill.body[:500]}[/dim]")
+                else:
+                    log.write(f"[red]Skill not found: {name}[/red]")
         elif cmd.startswith("remember "):
             if self._loop:
                 fact = text[9:].strip()  # After "/remember "
