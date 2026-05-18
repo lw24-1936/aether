@@ -1,7 +1,8 @@
-"""Agent Loop — the core execution cycle.
+"""Agent Loop v2 — with circuit breaker, retry/degrade/escalate, security.
 
-Planner → Executor → Observer → Reflector
-with retry, degradation, and user escalation.
+Planner → [Security Check] → Executor → Observer → Reflector
+  ↑                                                    │
+  └──── retry ──── degrade ──── escalate ──────────────┘
 """
 
 from __future__ import annotations
@@ -9,28 +10,43 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from aether.core.config import AetherConfig
 from aether.core.llm import LLMClient, ChatMessage
 from aether.core.models import Artifact, StreamEvent, Task, TaskStatus
+from aether.core.circuit_breaker import BreakerRegistry
+from aether.core.security import (
+    ApprovalManager,
+    PermissionLevel,
+    is_command_blacklisted,
+)
 from aether.tools.terminal import TerminalTool
 from aether.tools.file import FileTools
 
 
 # ═══════════════════════════════════════════════════════════
-# Tool registry
+# Enhanced step result
 # ═══════════════════════════════════════════════════════════
+
+class StepOutcome(str, Enum):
+    SUCCESS = "success"
+    RETRY = "retry"
+    DEGRADE = "degrade"
+    ESCALATE = "escalate"
+    FATAL = "fatal"
+
 
 @dataclass
 class ToolDef:
     name: str
     description: str
     parameters: dict
-    handler: Any  # callable
+    handler: Any
+    permission_level: PermissionLevel
 
 
 def _build_tool_registry(workdir: Path) -> dict[str, ToolDef]:
@@ -41,26 +57,35 @@ def _build_tool_registry(workdir: Path) -> dict[str, ToolDef]:
         "terminal": ToolDef(
             name="terminal",
             description="Execute shell commands. Returns {output, exit_code}.",
-            parameters=terminal.parameters,
-            handler=terminal,
-        ),
-        "read_file": ToolDef(
-            name="read_file",
-            description="Read a file with line numbers. Args: path, offset (default 1), limit (default 500).",
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path"},
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer", "default": 30},
+                },
+                "required": ["command"],
+            },
+            handler=terminal,
+            permission_level=PermissionLevel.EXECUTE,
+        ),
+        "read_file": ToolDef(
+            name="read_file",
+            description="Read a file with line numbers.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
                     "offset": {"type": "integer", "default": 1},
                     "limit": {"type": "integer", "default": 500},
                 },
                 "required": ["path"],
             },
             handler=file_tools,
+            permission_level=PermissionLevel.READ_ONLY,
         ),
         "write_file": ToolDef(
             name="write_file",
-            description="Write content to a file (overwrites). Args: path, content.",
+            description="Write content to a file (overwrites).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -70,10 +95,11 @@ def _build_tool_registry(workdir: Path) -> dict[str, ToolDef]:
                 "required": ["path", "content"],
             },
             handler=file_tools,
+            permission_level=PermissionLevel.WRITE,
         ),
         "search_files": ToolDef(
             name="search_files",
-            description="Search file contents with regex. Args: pattern, path, file_glob, limit.",
+            description="Search file contents with regex.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -85,10 +111,11 @@ def _build_tool_registry(workdir: Path) -> dict[str, ToolDef]:
                 "required": ["pattern"],
             },
             handler=file_tools,
+            permission_level=PermissionLevel.READ_ONLY,
         ),
         "patch_file": ToolDef(
             name="patch_file",
-            description="Replace text in a file. Args: path, old_string, new_string, replace_all (default false).",
+            description="Find-and-replace text in a file.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -100,12 +127,12 @@ def _build_tool_registry(workdir: Path) -> dict[str, ToolDef]:
                 "required": ["path", "old_string", "new_string"],
             },
             handler=file_tools,
+            permission_level=PermissionLevel.WRITE,
         ),
     }
 
 
 def _tools_to_openai_format(tools: dict[str, ToolDef]) -> list[dict]:
-    """Convert tool registry to OpenAI function format."""
     result = []
     for name, tool in tools.items():
         result.append({
@@ -120,14 +147,11 @@ def _tools_to_openai_format(tools: dict[str, ToolDef]) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════
-# Agent Loop
+# Agent Loop v2
 # ═══════════════════════════════════════════════════════════
 
 class AgentLoop:
-    """Core agent execution loop.
-
-    Think → Act → Observe → Reflect → (retry/degrade/escalate)
-    """
+    """Enhanced agent loop with circuit breaker, security, and recovery."""
 
     MAX_RETRIES = 3
     MAX_STEPS = 20
@@ -137,10 +161,36 @@ class AgentLoop:
         self.workdir = workdir or Path.cwd()
         self.llm = LLMClient(config)
         self.tools = _build_tool_registry(self.workdir)
+        self.breakers = BreakerRegistry()
+        self.approval = ApprovalManager(config.security)
         self._step_count = 0
+        self._pending_approvals: dict[str, Any] = {}
 
     async def close(self) -> None:
         await self.llm.close()
+
+    def get_pending_approvals(self) -> list[dict]:
+        """Get pending approval requests (for CLI polling)."""
+        return [
+            {
+                "id": req.id,
+                "tool": req.tool_name,
+                "level": req.level.name,
+                "args": req.args_preview,
+                "risk": req.risk_description,
+            }
+            for req in self.approval._pending.values()
+        ]
+
+    def handle_approval(self, request_id: str, decision: str) -> str:
+        """Handle user's approval decision. Returns 'approved'/'denied'/'timed_out'."""
+        if decision == "approve":
+            self.approval.approve(request_id, session_wide=False)
+        elif decision == "deny":
+            self.approval.deny(request_id)
+        elif decision == "approve_session":
+            self.approval.approve(request_id, session_wide=True)
+        return decision
 
     async def run(
         self,
@@ -148,10 +198,7 @@ class AgentLoop:
         history: list[ChatMessage] | None = None,
         system_prompt: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Run the agent loop for a user message.
-
-        Yields StreamEvent for each step: thinking, tool_call, tool_result, text_delta, done.
-        """
+        """Run the agent loop with full recovery support."""
         session_id = uuid.uuid4().hex[:12]
         task = Task(
             id=uuid.uuid4().hex[:12],
@@ -164,32 +211,55 @@ class AgentLoop:
         messages.append(ChatMessage(role="user", content=user_message))
 
         sys_prompt = system_prompt or "You are Aether, a helpful AI assistant with access to tools."
-
-        # Build system prompt with tools
         tool_list = "\n".join(
             f"- {name}: {tool.description}" for name, tool in self.tools.items()
         )
         full_system = (
             f"{sys_prompt}\n\n"
             f"Available tools:\n{tool_list}\n\n"
-            "When you need to use a tool, respond with a JSON function call.\n"
-            "When you are done, respond normally without a function call."
+            "When you need a tool, respond with a JSON function call.\n"
+            "When done, respond normally."
         )
 
         tool_schemas = _tools_to_openai_format(self.tools)
         self._step_count = 0
+        consecutive_failures = 0
 
         while self._step_count < self.MAX_STEPS:
             self._step_count += 1
 
-            # ── ① PLAN: Call LLM with tool definitions ──
             yield StreamEvent(
                 event_id=uuid.uuid4().hex,
                 type="thinking",
                 data={"step": self._step_count, "status": "planning"},
             )
 
+            # ── Check timeouts ──
+            timed_out = self.approval.check_timeouts()
+            for req in timed_out:
+                yield StreamEvent(
+                    event_id=uuid.uuid4().hex,
+                    type="permission_resolved",
+                    data={"id": req.id, "status": "timed_out"},
+                )
+
+            # ── Call LLM ──
             try:
+                breaker = self.breakers.get("llm")
+                if not breaker.before_call():
+                    yield StreamEvent(
+                        event_id=uuid.uuid4().hex,
+                        type="error",
+                        data={"message": "LLM circuit breaker open — cooling down"},
+                    )
+                    # Degrade: return simple error message
+                    messages.append(ChatMessage(
+                        role="assistant",
+                        content="I'm temporarily unable to process your request. Please try again in a moment.",
+                    ))
+                    task.status = TaskStatus.DEGRADING
+                    break
+
                 response = await self.llm._call_api(
                     self.llm.primary.provider,
                     self.llm.primary.model,
@@ -202,16 +272,35 @@ class AgentLoop:
                     max_tokens=self.llm.primary.max_tokens,
                 )
             except Exception as e:
+                breaker.on_failure(str(e))
+                consecutive_failures += 1
                 yield StreamEvent(
                     event_id=uuid.uuid4().hex,
                     type="error",
                     data={"message": f"LLM call failed: {e}"},
                 )
-                task.status = TaskStatus.FAILED
-                task.error = str(e)
-                break
+                outcome = self._decide_outcome(consecutive_failures)
+                if outcome == StepOutcome.RETRY and self._step_count < self.MAX_STEPS:
+                    task.status = TaskStatus.RETRYING
+                    continue
+                elif outcome == StepOutcome.DEGRADE:
+                    task.status = TaskStatus.DEGRADING
+                    messages.append(ChatMessage(
+                        role="assistant",
+                        content="I encountered an error. Please try again or simplify your request.",
+                    ))
+                    break
+                else:
+                    task.status = TaskStatus.FAILED
+                    break
 
             if response.status_code != 200:
+                breaker.on_failure(f"HTTP {response.status_code}")
+                consecutive_failures += 1
+                outcome = self._decide_outcome(consecutive_failures)
+                if outcome == StepOutcome.RETRY:
+                    task.status = TaskStatus.RETRYING
+                    continue
                 yield StreamEvent(
                     event_id=uuid.uuid4().hex,
                     type="error",
@@ -220,17 +309,20 @@ class AgentLoop:
                 task.status = TaskStatus.FAILED
                 break
 
+            breaker.on_success()
+            consecutive_failures = 0  # Reset on success
+
             data = response.json()
             choice = data["choices"][0]
             msg = choice["message"]
-
-            # ── Check for tool call ──
             tool_calls = msg.get("tool_calls")
+
             if tool_calls:
-                # ── ③ EXECUTE: Run the tool ──
+                # ── Process tool calls ──
                 for tc in tool_calls:
                     func = tc["function"]
                     tool_name = func["name"]
+
                     try:
                         tool_args = json.loads(func["arguments"])
                     except json.JSONDecodeError:
@@ -245,62 +337,96 @@ class AgentLoop:
                     tool = self.tools.get(tool_name)
                     if not tool:
                         result = {"error": f"Unknown tool: {tool_name}"}
-                    else:
-                        try:
-                            handler = tool.handler
-                            # Map tool_name to handler method
-                            if tool_name == "terminal":
-                                res = await handler.execute(**tool_args)
-                                result = {"output": res.stdout, "exit_code": res.exit_code}
-                                if res.stderr:
-                                    result["stderr"] = res.stderr
-                            elif tool_name == "read_file":
-                                res = handler.read(**tool_args)
-                                result = {"content": res.content, "total_lines": res.total_lines}
-                            elif tool_name == "write_file":
-                                res = handler.write(**tool_args)
-                                result = {"path": res.path, "bytes_written": res.bytes_written}
-                            elif tool_name == "search_files":
-                                res = handler.search(**tool_args)
-                                result = {"matches": res.matches, "total_matches": res.total_matches}
-                            elif tool_name == "patch_file":
-                                res = handler.patch(**tool_args)
-                                result = {"path": res.path, "bytes_written": res.bytes_written}
-                            else:
-                                result = {"error": f"No handler for: {tool_name}"}
-                        except Exception as e:
-                            result = {"error": str(e)}
+                        yield StreamEvent(
+                            event_id=uuid.uuid4().hex,
+                            type="tool_result",
+                            data={"name": tool_name, "result": result},
+                        )
+                        messages.append(ChatMessage(
+                            role="assistant", content="",
+                            tool_calls=[{"id": tc["id"], "type": "function",
+                                         "function": {"name": tool_name, "arguments": func["arguments"]}}],
+                        ))
+                        messages.append(ChatMessage(
+                            role="tool", content=json.dumps(result, ensure_ascii=False),
+                            tool_call_id=tc["id"],
+                        ))
+                        continue
 
-                    # ── ④ OBSERVE: Record result ──
+                    # ── Security check ──
+                    cmd = tool_args.get("command", "")
+                    if tool_name == "terminal" and is_command_blacklisted(cmd):
+                        result = {"error": f"Command blocked by security policy: {cmd[:80]}"}
+                        yield StreamEvent(
+                            event_id=uuid.uuid4().hex,
+                            type="tool_result",
+                            data={"name": tool_name, "result": result},
+                        )
+                        messages.append(ChatMessage(
+                            role="assistant", content="",
+                            tool_calls=[{"id": tc["id"], "type": "function",
+                                         "function": {"name": tool_name, "arguments": func["arguments"]}}],
+                        ))
+                        messages.append(ChatMessage(
+                            role="tool", content=json.dumps(result, ensure_ascii=False),
+                            tool_call_id=tc["id"],
+                        ))
+                        continue
+
+                    # ── Approval check ──
+                    if self.approval.needs_approval(tool_name, tool.permission_level):
+                        req = self.approval.create_request(
+                            tool_name, tool.permission_level,
+                            str(tool_args)[:200],
+                        )
+                        yield StreamEvent(
+                            event_id=uuid.uuid4().hex,
+                            type="permission_request",
+                            data={
+                                "id": req.id,
+                                "tool": tool_name,
+                                "level": req.level.name,
+                                "args": req.args_preview,
+                                "risk": req.risk_description,
+                            },
+                        )
+                        # Store for async approval handling
+                        self._pending_approvals[req.id] = (tc, tool, tool_args, messages)
+                        # Return control to CLI for user input
+                        yield StreamEvent(
+                            event_id=uuid.uuid4().hex,
+                            type="status_change",
+                            data={"status": "awaiting_approval", "request_id": req.id},
+                        )
+                        return  # Wait for approval callback
+
+                    # ── Execute tool ──
+                    tool_breaker = self.breakers.get(tool_name)
+                    if not tool_breaker.before_call():
+                        result = {"error": f"Tool '{tool_name}' circuit breaker open"}
+                    else:
+                        result = await self._execute_tool(tool_name, tool, tool_args, tool_breaker)
+
                     yield StreamEvent(
                         event_id=uuid.uuid4().hex,
                         type="tool_result",
                         data={"name": tool_name, "result": result},
                     )
 
-                    # Add tool call + result to messages
                     messages.append(ChatMessage(
-                        role="assistant",
-                        content="",
-                        tool_calls=[{
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {"name": tool_name, "arguments": func["arguments"]},
-                        }],
+                        role="assistant", content="",
+                        tool_calls=[{"id": tc["id"], "type": "function",
+                                     "function": {"name": tool_name, "arguments": func["arguments"]}}],
                     ))
                     messages.append(ChatMessage(
-                        role="tool",
-                        content=json.dumps(result, ensure_ascii=False),
+                        role="tool", content=json.dumps(result, ensure_ascii=False),
                         tool_call_id=tc["id"],
                     ))
 
-                # Continue loop to let LLM process tool results
-                continue
+                continue  # More tool processing
 
-            # ── No tool call: final text response ──
+            # ── Final text response ──
             content = msg.get("content", "")
-
-            # Emit text as stream event
             yield StreamEvent(
                 event_id=uuid.uuid4().hex,
                 type="text_delta",
@@ -311,14 +437,11 @@ class AgentLoop:
                 type="text_done",
                 data={"content": content},
             )
-
             messages.append(ChatMessage(role="assistant", content=content))
             task.status = TaskStatus.COMPLETED
-            task.artifacts.append(Artifact(type="text", content=content))
             break
 
         else:
-            # Max steps reached
             yield StreamEvent(
                 event_id=uuid.uuid4().hex,
                 type="error",
@@ -326,13 +449,109 @@ class AgentLoop:
             )
             task.status = TaskStatus.FAILED
 
-        # ── Done ──
         yield StreamEvent(
             event_id=uuid.uuid4().hex,
             type="done",
-            data={
-                "task_id": task.id,
-                "status": task.status.value,
-                "steps": self._step_count,
-            },
+            data={"task_id": task.id, "status": task.status.value, "steps": self._step_count},
         )
+
+    async def resume_after_approval(
+        self,
+        request_id: str,
+        decision: str,
+        messages: list[ChatMessage],
+    ) -> AsyncIterator[StreamEvent]:
+        """Resume execution after user handles an approval request."""
+        if request_id not in self._pending_approvals:
+            yield StreamEvent(
+                event_id=uuid.uuid4().hex,
+                type="error",
+                data={"message": f"Unknown approval request: {request_id}"},
+            )
+            return
+
+        tc, tool, tool_args, msg_list = self._pending_approvals.pop(request_id)
+
+        if decision == "deny" or decision == "timed_out":
+            result = {"error": f"Tool '{tool.name}' was denied by user"}
+            yield StreamEvent(
+                event_id=uuid.uuid4().hex,
+                type="tool_result",
+                data={"name": tool.name, "result": result},
+            )
+            msg_list.append(ChatMessage(
+                role="assistant", content="",
+                tool_calls=[{"id": tc["id"], "type": "function",
+                             "function": {"name": tool.name, "arguments": tc["function"]["arguments"]}}],
+            ))
+            msg_list.append(ChatMessage(
+                role="tool", content=json.dumps(result, ensure_ascii=False),
+                tool_call_id=tc["id"],
+            ))
+        else:
+            # Approved — execute
+            tool_breaker = self.breakers.get(tool.name)
+            if not tool_breaker.before_call():
+                result = {"error": f"Tool '{tool.name}' circuit breaker open"}
+            else:
+                result = await self._execute_tool(tool.name, tool, tool_args, tool_breaker)
+            yield StreamEvent(
+                event_id=uuid.uuid4().hex,
+                type="tool_result",
+                data={"name": tool.name, "result": result},
+            )
+            msg_list.append(ChatMessage(
+                role="assistant", content="",
+                tool_calls=[{"id": tc["id"], "type": "function",
+                             "function": {"name": tool.name, "arguments": tc["function"]["arguments"]}}],
+            ))
+            msg_list.append(ChatMessage(
+                role="tool", content=json.dumps(result, ensure_ascii=False),
+                tool_call_id=tc["id"],
+            ))
+
+        # Continue the loop with updated messages
+        async for event in self.run(
+            user_message="",  # continuation
+            history=msg_list,
+        ):
+            yield event
+
+    async def _execute_tool(
+        self, tool_name: str, tool: ToolDef, args: dict, breaker
+    ) -> dict:
+        """Execute a tool with error handling."""
+        try:
+            if tool_name == "terminal":
+                res = await tool.handler.execute(**args)
+                result = {"output": res.stdout, "exit_code": res.exit_code}
+                if res.stderr:
+                    result["stderr"] = res.stderr[:500]
+            elif tool_name == "read_file":
+                res = tool.handler.read(**args)
+                result = {"content": res.content, "total_lines": res.total_lines}
+            elif tool_name == "write_file":
+                res = tool.handler.write(**args)
+                result = {"path": res.path, "bytes_written": res.bytes_written}
+            elif tool_name == "search_files":
+                res = tool.handler.search(**args)
+                result = {"matches": res.matches, "total_matches": res.total_matches}
+            elif tool_name == "patch_file":
+                res = tool.handler.patch(**args)
+                result = {"path": res.path, "bytes_written": res.bytes_written}
+            else:
+                result = {"error": f"No handler: {tool_name}"}
+            breaker.on_success()
+            return result
+        except Exception as e:
+            breaker.on_failure(str(e))
+            return {"error": str(e)}
+
+    def _decide_outcome(self, consecutive_failures: int) -> StepOutcome:
+        """Decide: retry, degrade, or escalate."""
+        if consecutive_failures < self.MAX_RETRIES:
+            return StepOutcome.RETRY
+        elif consecutive_failures < self.MAX_RETRIES + 2:
+            return StepOutcome.DEGRADE
+        else:
+            return StepOutcome.ESCALATE
