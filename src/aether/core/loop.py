@@ -26,6 +26,8 @@ from aether.core.security import (
 )
 from aether.memory.manager import MemoryManager
 from aether.skills.manager import SkillManager
+from aether.core.sandbox import Sandbox, SandboxConfig as SandboxCfg
+from aether.core.audit import AuditLogger
 from aether.tools.terminal import TerminalTool
 from aether.tools.file import FileTools
 
@@ -168,6 +170,8 @@ class AgentLoop:
         self.memory = MemoryManager(max_entries=config.memory.max_entries)
         self.skills = SkillManager()
         self.skills.discover()
+        self.sandbox = Sandbox(SandboxCfg())
+        self.audit = AuditLogger()
         self._step_count = 0
         self._pending_approvals: dict[str, Any] = {}
 
