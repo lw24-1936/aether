@@ -286,6 +286,31 @@ class AetherTUI(App):
                 for status in self._loop.breakers.status_all():
                     log.write(f"  {status['name']}: [{'red' if status['state'] == 'open' else 'green'}]{status['state']}[/] "
                               f"(failures: {status['failure_count']})")
+        elif cmd == "memory":
+            if self._loop:
+                stats = self._loop.memory.stats()
+                log.write(f"[bold]Memory:[/bold] {stats['total_entries']}/{stats['max_entries']} "
+                          f"({stats['usage_percent']}%) "
+                          f"user:{stats['by_target'].get('user',0)} "
+                          f"project:{stats['by_target'].get('project',0)} "
+                          f"env:{stats['by_target'].get('environment',0)}")
+                recent = self._loop.memory.recall_recent(5)
+                if recent:
+                    log.write("\n[bold]Recent:[/bold]")
+                    for r in recent:
+                        log.write(f"  [dim]{r.target}[/dim]: {r.content[:80]}")
+        elif cmd.startswith("remember "):
+            if self._loop:
+                fact = text[9:].strip()  # After "/remember "
+                self._loop.memory.remember(fact, target="user")
+                log.write(f"[green]✓ Remembered:[/green] {fact[:80]}")
+        elif cmd.startswith("forget "):
+            if self._loop:
+                mem_id = text[7:].strip()
+                if self._loop.memory.forget(mem_id):
+                    log.write(f"[green]✓ Forgotten:[/green] {mem_id}")
+                else:
+                    log.write(f"[red]Not found:[/red] {mem_id}")
         else:
             log.write(f"[red]Unknown: {text}[/red]")
 

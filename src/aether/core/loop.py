@@ -24,6 +24,7 @@ from aether.core.security import (
     PermissionLevel,
     is_command_blacklisted,
 )
+from aether.memory.manager import MemoryManager
 from aether.tools.terminal import TerminalTool
 from aether.tools.file import FileTools
 
@@ -163,11 +164,13 @@ class AgentLoop:
         self.tools = _build_tool_registry(self.workdir)
         self.breakers = BreakerRegistry()
         self.approval = ApprovalManager(config.security)
+        self.memory = MemoryManager(max_entries=config.memory.max_entries)
         self._step_count = 0
         self._pending_approvals: dict[str, Any] = {}
 
     async def close(self) -> None:
         await self.llm.close()
+        self.memory.close()
 
     def get_pending_approvals(self) -> list[dict]:
         """Get pending approval requests (for CLI polling)."""
@@ -211,11 +214,24 @@ class AgentLoop:
         messages.append(ChatMessage(role="user", content=user_message))
 
         sys_prompt = system_prompt or "You are Aether, a helpful AI assistant with access to tools."
+
+        # ── Inject relevant memories into system prompt ──
+        relevant_memories = self.memory.recall(user_message, limit=5)
+        memory_context = ""
+        if relevant_memories:
+            memory_lines = [f"- {m.content}" for m in relevant_memories]
+            memory_context = (
+                "\n\nRelevant memories from past conversations:\n"
+                + "\n".join(memory_lines)
+                + "\n\nUse these to personalize your response. "
+                "If the user shares a new preference or fact worth remembering, "
+                "say 'I'll remember that' and it will be saved automatically."
+            )
         tool_list = "\n".join(
             f"- {name}: {tool.description}" for name, tool in self.tools.items()
         )
         full_system = (
-            f"{sys_prompt}\n\n"
+            f"{sys_prompt}{memory_context}\n\n"
             f"Available tools:\n{tool_list}\n\n"
             "When you need a tool, respond with a JSON function call.\n"
             "When done, respond normally."
