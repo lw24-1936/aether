@@ -208,8 +208,12 @@ class AgentLoop:
         history: list[ChatMessage] | None = None,
         system_prompt: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Run the agent loop with full recovery support."""
-        session_id = uuid.uuid4().hex[:12]
+        """Run the agent loop with full recovery support.
+
+        Pass user_message="" and history=None to continue after approval.
+        """
+        session_id = uuid.uuid4().hex[:12] if not hasattr(self, '_session_id') else self._session_id
+        self._session_id = session_id
         task = Task(
             id=uuid.uuid4().hex[:12],
             session_id=session_id,
@@ -218,7 +222,18 @@ class AgentLoop:
         )
 
         messages: list[ChatMessage] = list(history) if history else []
-        messages.append(ChatMessage(role="user", content=user_message))
+        
+        # If continuing (empty msg + no history), use the loop's internal messages
+        is_continuation = (not user_message and history is None)
+        if not is_continuation:
+            messages.append(ChatMessage(role="user", content=user_message))
+        elif not hasattr(self, '_messages'):
+            self._messages = messages
+            messages.append(ChatMessage(role="user", content=user_message))
+        else:
+            messages = self._messages
+        
+        self._messages = messages
 
         sys_prompt = system_prompt or "You are Aether, a helpful AI assistant with access to tools."
 

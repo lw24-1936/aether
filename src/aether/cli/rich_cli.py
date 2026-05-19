@@ -1,7 +1,4 @@
-"""Aether Rich CLI — simple REPL mode (--simple flag).
-
-Kept for lightweight usage and as fallback when Textual isn't available.
-"""
+"""Aether Rich CLI — simple REPL mode (--simple flag)."""
 
 from __future__ import annotations
 
@@ -18,7 +15,6 @@ from aether.platform import PlatformInfo
 
 
 async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
-    """Simple Rich REPL loop."""
     console = Console()
     platform = PlatformInfo()
 
@@ -49,15 +45,18 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
                     console.print("[dim]Goodbye![/dim]")
                     break
                 elif cmd == "help":
-                    console.print("[bold]/help /quit /tools /breakers /clear[/bold]")
+                    console.print("[bold]/help /quit /tools /skills /memory /breakers /clear[/bold]")
                 elif cmd == "tools":
                     for name, tool in loop.tools.items():
-                        console.print(f"  {name}: {tool.description[:80]}")
+                        console.print(f"  [bold]{name}[/bold]: {tool.description[:80]}")
                 elif cmd == "skills":
                     skills = loop.skills.list_all()
                     console.print(f"[bold]Skills ({len(skills)}):[/bold]")
                     for s in skills:
                         console.print(f"  [bold]{s.name}[/bold] [{s.category}]: {s.description[:60]}")
+                elif cmd == "memory":
+                    stats = loop.memory.stats()
+                    console.print(f"[bold]Memory:[/bold] {stats['total_entries']}/{stats['max_entries']} ({stats['usage_percent']}%)")
                 elif cmd == "breakers":
                     for s in loop.breakers.status_all():
                         color = "red" if s["state"] == "open" else "green"
@@ -66,35 +65,77 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
                     console.clear()
                 continue
 
+            # ── Run agent loop for user message ──
             history.append(ChatMessage(role="user", content=user_input))
-            console.print()
 
-            try:
-                async for event in loop.run(user_message=user_input, history=history[:-1]):
-                    if event.type == "tool_call":
-                        name = event.data.get("name", "?")
-                        console.print(f"  [yellow]🔧 {name}[/yellow]")
-                    elif event.type == "text_delta":
-                        console.print(event.data.get("content", ""), end="", markup=False)
-                    elif event.type == "permission_request":
-                        console.print(f"\n  [orange1]⚠ {event.data.get('tool')} needs approval[/orange1]")
-                        console.print(f"  [dim]{event.data.get('args', '')[:100]}[/dim]")
-                        choice = console.input("  [A]pprove / [D]eny / [S]ession? ").strip().lower()
-                        if choice == "a":
-                            loop.handle_approval(event.data.get("id"), "approve")
-                        elif choice == "s":
-                            loop.handle_approval(event.data.get("id"), "approve_session")
-                        else:
-                            loop.handle_approval(event.data.get("id"), "deny")
-                    elif event.type == "error":
-                        console.print(f"\n[red]{event.data.get('message', 'unknown')}[/red]")
-                    elif event.type == "done":
-                        console.print(f"\n[dim]({event.data.get('status', '?')})[/dim]")
-            except Exception as e:
-                console.print(f"\n[red]Error: {e}[/red]")
-            console.print("\n")
+            # We may need multiple loop runs if approval is needed
+            messages_for_loop = list(history[:-1])  # exclude latest user msg (loop adds it)
+            user_msg = user_input
+
+            while True:
+                console.print()
+                try:
+                    async for event in loop.run(user_message=user_msg, history=messages_for_loop):
+                        if event.type == "tool_call":
+                            name = event.data.get("name", "?")
+                            console.print(f"  [yellow]🔧 {name}[/yellow]")
+
+                        elif event.type == "tool_result":
+                            name = event.data.get("name", "?")
+                            result = event.data.get("result", {})
+                            if "error" in result:
+                                console.print(f"  [red]✗ {name}: {result['error'][:100]}[/red]")
+                            elif "output" in result:
+                                out = result["output"].strip()[:300]
+                                if out:
+                                    console.print(f"  [dim]{out}[/dim]")
+
+                        elif event.type == "text_delta":
+                            content = event.data.get("content", "")
+                            console.print(content, end="", markup=False)
+
+                        elif event.type == "permission_request":
+                            tool_name = event.data.get("tool", "?")
+                            args = event.data.get("args", "")[:150]
+                            console.print(f"\n  [orange1]⚠ {tool_name} needs approval[/orange1]")
+                            console.print(f"  [dim]{args}[/dim]")
+                            choice = console.input("  [A]pprove / [D]eny / [S]ession? ").strip().lower()
+
+                            req_id = event.data.get("id")
+                            if choice == "a":
+                                loop.handle_approval(req_id, "approve")
+                            elif choice == "s":
+                                loop.handle_approval(req_id, "approve_session")
+                            else:
+                                loop.handle_approval(req_id, "deny")
+
+                            # Restart loop from current state (no new user msg)
+                            user_msg = ""
+                            messages_for_loop = None  # loop will use internal state
+                            break  # break inner for, restart while
+
+                        elif event.type == "error":
+                            console.print(f"\n[red]{event.data.get('message', 'unknown')[:200]}[/red]")
+
+                        elif event.type == "done":
+                            status = event.data.get("status", "?")
+                            console.print(f"\n[dim]({status})[/dim]")
+                            user_msg = "__DONE__"  # signal to exit inner while
+
+                    else:
+                        # for-loop completed without break → done
+                        user_msg = "__DONE__"
+
+                except Exception as e:
+                    console.print(f"\n[red]Error: {e}[/red]")
+                    user_msg = "__DONE__"
+
+                if user_msg == "__DONE__":
+                    console.print()
+                    break  # exit inner while, back to user input
+
     finally:
         try:
             await loop.close()
         except Exception:
-            pass  # Windows httpx cleanup may fail, ignore
+            pass
