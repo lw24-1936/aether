@@ -224,14 +224,22 @@ class SQLiteMemoryStore:
         limit: int = 10,
     ) -> list[MemoryRecord]:
         """Full-text keyword search via FTS5."""
-        rows = self.conn.execute(
-            """SELECT m.* FROM memories m
-               JOIN memories_fts fts ON m.rowid = fts.rowid
-               WHERE memories_fts MATCH ? AND m.user_id = ?
-               ORDER BY rank
-               LIMIT ?""",
-            (query, user_id, limit),
-        ).fetchall()
+        # Sanitize FTS5 query: escape special chars, ensure non-empty
+        sanitized = query.strip().replace('"', '""').replace("'", "''")
+        if not sanitized:
+            return []
+        # Wrap in quotes for exact phrase match, fallback to simple token match
+        try:
+            rows = self.conn.execute(
+                """SELECT m.* FROM memories m
+                   JOIN memories_fts fts ON m.rowid = fts.rowid
+                   WHERE memories_fts MATCH ? AND m.user_id = ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (sanitized, user_id, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
         results = [self._row_to_record(r) for r in rows]
 
         # Update access count

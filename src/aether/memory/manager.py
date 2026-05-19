@@ -79,10 +79,10 @@ class MemoryManager:
         target: MemoryTarget | None = None,
         limit: int = 10,
     ) -> list[MemoryRecord]:
-        """Search memories by keyword (FTS5).
+        """Search memories by keyword (FTS5)."""
+        if not query or not query.strip():
+            return self.recall_recent(limit)
 
-        Priority order: keyword match → importance → recency
-        """
         results = self.store.search_keyword(query, self.user_id, limit)
 
         # If no keyword results, try recent

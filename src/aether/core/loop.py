@@ -238,7 +238,7 @@ class AgentLoop:
         sys_prompt = system_prompt or "You are Aether, a helpful AI assistant with access to tools."
 
         # ── Inject relevant memories into system prompt ──
-        relevant_memories = self.memory.recall(user_message, limit=5)
+        relevant_memories = self.memory.recall(user_message, limit=5) if user_message else []
         memory_context = ""
         if relevant_memories:
             memory_lines = [f"- {m.content}" for m in relevant_memories]
