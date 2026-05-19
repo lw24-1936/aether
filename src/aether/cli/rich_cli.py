@@ -13,9 +13,8 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
-from rich.live import Live
-from rich.text import Text
 
 from aether.core.config import AetherConfig
 from aether.core.llm import ChatMessage
@@ -77,12 +76,13 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
                             name = event.data.get("name", "?")
                             result = event.data.get("result", {})
                             if "error" in result:
-                                console.print(f"  [red]✗ {name}[/red] [dim]{result['error'][:100]}[/dim]")
+                                err = rich_escape(str(result["error"])[:100])
+                                console.print(f"  [red]✗ {name}[/red] [dim]{err}[/dim]")
                             elif "output" in result:
                                 out = result["output"].strip()
                                 if out:
                                     for line in out.split("\n")[:10]:
-                                        console.print(f"  [dim]│ {line[:100]}[/dim]")
+                                        console.print(f"  [dim]│ {rich_escape(line[:100])}[/dim]")
 
                         elif event.type == "text_delta":
                             content = event.data.get("content", "")
@@ -121,7 +121,8 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
                             break
 
                         elif event.type == "error":
-                            console.print(f"\n[red]Error: {event.data.get('message', '?')[:200]}[/red]")
+                            msg = rich_escape(str(event.data.get('message', '?'))[:200])
+                            console.print(f"\n[red]Error: {msg}[/red]")
 
                         elif event.type == "done":
                             status = event.data.get("status", "?")
@@ -133,7 +134,7 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
                         user_msg = "__DONE__"
 
                 except Exception as e:
-                    console.print(f"\n[red]Error: {e}[/red]")
+                    console.print(f"\n[red]Error: {rich_escape(str(e))}[/red]")
                     user_msg = "__DONE__"
 
                 if user_msg == "__DONE__":

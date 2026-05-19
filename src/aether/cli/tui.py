@@ -16,7 +16,6 @@ from textual.widgets import (
     Header,
     Input,
     Label,
-    Markdown,
     RichLog,
     Static,
 )
