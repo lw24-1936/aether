@@ -26,8 +26,10 @@ from aether.core.security import (
 )
 from aether.memory.manager import MemoryManager
 from aether.skills.manager import SkillManager
+from aether.core.profile import UserProfile
 from aether.core.sandbox import Sandbox, SandboxConfig as SandboxCfg
 from aether.core.audit import AuditLogger
+from aether.core.session_store import SessionStore
 from aether.tools.terminal import TerminalTool
 from aether.tools.file import FileTools
 
@@ -170,8 +172,10 @@ class AgentLoop:
         self.memory = MemoryManager(max_entries=config.memory.max_entries)
         self.skills = SkillManager()
         self.skills.discover()
+        self.profile = UserProfile()
         self.sandbox = Sandbox(SandboxCfg())
         self.audit = AuditLogger()
+        self.sessions = SessionStore()
         self._step_count = 0
         self._pending_approvals: dict[str, Any] = {}
 
@@ -291,7 +295,8 @@ class AgentLoop:
         )
         full_system = (
             f"{sys_prompt}{memory_context}{skill_context}\n\n"
-            f"Available tools:\n{tool_list}\n\n"
+            + (self.profile.format_for_prompt() + "\n\n" if self.profile.name else "")
+            + f"Available tools:\n{tool_list}\n\n"
             "When you need a tool, respond with a JSON function call.\n"
             "When done, respond normally."
         )

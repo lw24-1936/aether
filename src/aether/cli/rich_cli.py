@@ -20,10 +20,27 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
 
     # ── Banner (static Rich markup) ──
     console.print(Panel(
-        f"[bold cyan]Aether[/bold cyan] v0.2.1\n"
+        f"[bold cyan]Aether[/bold cyan] v0.3.0\n"
         f"[dim]{platform.os} · {config.model.provider}/{config.model.model}[/dim]",
         border_style="cyan",
     ))
+    
+    # Show profile + memory stats (Hermes-style)
+    profile_stats = loop.profile.stats()
+    mem_stats = loop.memory.stats()
+    skills_count = len(loop.skills.list_all())
+    
+    status_lines = []
+    if profile_stats["name"] != "(not set)":
+        status_lines.append(f"[bold]User:[/bold] {profile_stats['name']}")
+    status_lines.append(
+        f"[bold]Memory:[/bold] [{mem_stats['usage_percent']}% — {mem_stats['total_entries']}/{mem_stats['max_entries']}]"
+    )
+    status_lines.append(f"[bold]Skills:[/bold] {skills_count}")
+    
+    if status_lines:
+        console.print("  ".join(status_lines), style="dim")
+    
     console.print("[dim]输入消息开始对话 · /help 查看命令 · /quit 退出[/dim]\n")
 
     loop = AgentLoop(config, workdir)
@@ -134,13 +151,19 @@ def _handle_command(text: str, loop: AgentLoop, console: Console) -> None:
         # Static Rich markup — safe
         console.print("""
 [bold]命令[/bold]
-  [green]/help[/green]      帮助
-  [green]/quit[/green]      退出
-  [green]/tools[/green]     可用工具
-  [green]/skills[/green]    已加载技能
-  [green]/memory[/green]    记忆统计
-  [green]/breakers[/green]  断路保护
-  [green]/clear[/green]     清屏
+  [green]/help[/green]       帮助
+  [green]/quit[/green]       退出
+  [green]/profile[/green]    查看用户画像
+  [green]/sessions[/green]   历史会话
+  [green]/memory[/green]     记忆统计
+  [green]/skills[/green]     已加载技能
+  [green]/tools[/green]      可用工具
+  [green]/breakers[/green]   断路保护
+  [green]/clear[/green]      清屏
+
+[bold]设置[/bold]
+  [green]/i am 名字[/green]     告诉 Aether 你的名字
+  [green]/remember 内容[/green]  让 Aether 记住一件事
 """)
     elif cmd == "tools":
         for name, tool in loop.tools.items():
@@ -153,6 +176,18 @@ def _handle_command(text: str, loop: AgentLoop, console: Console) -> None:
     elif cmd == "memory":
         stats = loop.memory.stats()
         console.print(f"[bold]Memory:[/bold] {stats['total_entries']}/{stats['max_entries']} ({stats['usage_percent']}%)")
+    elif cmd == "profile":
+        s = loop.profile.stats()
+        console.print(f"[bold]Profile:[/bold] {s['name']} | lang={s['language']} | {s['usage_percent']}% full")
+    elif cmd == "sessions":
+        recent = loop.sessions.list_recent(5)
+        console.print("[bold]Recent sessions:[/bold]")
+        for s in recent:
+            console.print(f"  [dim]{s['updated']}[/dim] {s['title'][:50]}")
+    elif cmd.startswith("i am "):
+        name = text[5:].strip()
+        loop.profile.name = name
+        console.print(f"[green]✓ 记住了, {name}![/green]")
     elif cmd == "breakers":
         for s in loop.breakers.status_all():
             color = "red" if s["state"] == "open" else "green"
