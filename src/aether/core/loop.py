@@ -158,7 +158,7 @@ class AgentLoop:
     """Enhanced agent loop with circuit breaker, security, and recovery."""
 
     MAX_RETRIES = 3
-    MAX_STEPS = 20
+    MAX_STEPS = 8
 
     def __init__(self, config: AetherConfig, workdir: Path | None = None):
         self.config = config
@@ -255,6 +255,7 @@ class AgentLoop:
             "- Explain what you're doing before executing tools\n"
             "- If a command fails, read the error and adapt\n"
             "- For web requests, use: curl.exe -s URL (Windows) or curl -s URL (Linux)\n"
+            "- For date/time on Windows use: python -c \"from datetime import datetime; print(datetime.now())\"\n"
             "- Respond in the user's language\n"
             "- Be concise but thorough — no fluff"
         )

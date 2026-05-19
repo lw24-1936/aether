@@ -65,14 +65,9 @@ class TerminalTool:
         command: str,
         timeout: int = 30,
     ) -> ShellResult:
-        # Force UTF-8 on Windows
-        if sys.platform == "win32":
-            command = f"chcp 65001 >nul 2>&1 && {command}"
         command = self._adapt_command(command)
         return await self._executor.execute(command, timeout=timeout)
 
     def execute_sync(self, command: str, timeout: int = 30) -> ShellResult:
-        if sys.platform == "win32":
-            command = f"chcp 65001 >nul 2>&1 && {command}"
         command = self._adapt_command(command)
         return self._executor.execute_sync(command, timeout=timeout)
