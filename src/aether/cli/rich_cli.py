@@ -63,8 +63,7 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
                 try:
                     async for event in loop.run(user_message=user_msg, history=messages_for_loop):
                         if event.type == "thinking":
-                            step = event.data.get("step", 1)
-                            console.print(f"  [dim]⏳ 思考中... (step {step})[/dim]", end="\r")
+                            pass  # skip thinking indicator to avoid Rich \r issues
 
                         elif event.type == "tool_call":
                             name = event.data.get("name", "?")
