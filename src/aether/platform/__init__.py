@@ -115,6 +115,9 @@ class ShellExecutor:
         full_args = [*args]
 
         merged_env = os.environ.copy()
+        # Force UTF-8 for Python subprocesses
+        merged_env["PYTHONIOENCODING"] = "utf-8"
+        merged_env["PYTHONUTF8"] = "1"
         if env:
             merged_env.update(env)
 
@@ -133,9 +136,19 @@ class ShellExecutor:
             )
             elapsed = (time.monotonic() - start) * 1000
 
+            # Decode: try UTF-8 first, fall back to system encoding
+            try:
+                stdout = stdout_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                stdout = stdout_bytes.decode(sys.getdefaultencoding(), errors="replace")
+            try:
+                stderr = stderr_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                stderr = stderr_bytes.decode(sys.getdefaultencoding(), errors="replace")
+
             return ShellResult(
-                stdout=stdout_bytes.decode("utf-8", errors="replace"),
-                stderr=stderr_bytes.decode("utf-8", errors="replace"),
+                stdout=stdout,
+                stderr=stderr,
                 exit_code=proc.returncode or 0,
                 execution_time_ms=elapsed,
             )

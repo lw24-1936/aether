@@ -261,7 +261,9 @@ class AgentLoop:
             "- For web requests, use: curl.exe -s URL (Windows) or curl -s URL (Linux)\n"
             "- For date/time on Windows use: python -c \"from datetime import datetime; print(datetime.now())\"\n"
             "- Respond in the user's language\n"
-            "- Be concise but thorough — no fluff"
+            "- Be concise but thorough — no fluff\n"
+            "- CRITICAL: Use PLAIN TEXT only. Never use **bold**, `code`, ```blocks, or markdown tables.\n"
+            "- Use simple indented lists, not markdown bullets. Example: '  - item' not '* item'."
         )
 
         # ── Inject relevant memories into system prompt ──
