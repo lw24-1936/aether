@@ -12,7 +12,6 @@ import asyncio
 from pathlib import Path
 
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
 
@@ -85,12 +84,7 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
 
                         elif event.type == "text_delta":
                             content = event.data.get("content", "")
-                            # Render as markdown for rich formatting
-                            try:
-                                md = Markdown(content)
-                                console.print(md)
-                            except Exception:
-                                console.print(content)
+                            console.print(content, markup=False, highlight=False)
 
                         elif event.type == "permission_request":
                             tool_name = event.data.get("tool", "?")
