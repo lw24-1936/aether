@@ -307,6 +307,7 @@ class AgentLoop:
                     stream=False,
                     temperature=self.llm.primary.temperature,
                     max_tokens=self.llm.primary.max_tokens,
+                    tools=tool_schemas,
                 )
             except Exception as e:
                 breaker.on_failure(str(e))

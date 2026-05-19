@@ -94,4 +94,7 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
                 console.print(f"\n[red]Error: {e}[/red]")
             console.print("\n")
     finally:
-        await loop.close()
+        try:
+            await loop.close()
+        except Exception:
+            pass  # Windows httpx cleanup may fail, ignore
