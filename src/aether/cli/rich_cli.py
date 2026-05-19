@@ -68,7 +68,7 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
                         elif event.type == "tool_call":
                             name = event.data.get("name", "?")
                             args = event.data.get("arguments", {})
-                            cmd_preview = args.get("command", str(args))[:80]
+                            cmd_preview = rich_escape(str(args.get("command", str(args)))[:80])
                             console.print(f"  [yellow]⚡ {name}[/yellow] [dim]{cmd_preview}[/dim]")
 
                         elif event.type == "tool_result":
@@ -94,8 +94,8 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
 
                         elif event.type == "permission_request":
                             tool_name = event.data.get("tool", "?")
-                            args = event.data.get("args", "")[:120]
-                            risk = event.data.get("risk", "")
+                            args = rich_escape(str(event.data.get("args", ""))[:120])
+                            risk = rich_escape(str(event.data.get("risk", "")))
                             console.print(Panel(
                                 f"[bold orange1]🔐 需要授权[/bold orange1]\n"
                                 f"[bold]{tool_name}[/bold]\n"
