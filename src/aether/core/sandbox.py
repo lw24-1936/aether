@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -89,13 +90,20 @@ class ProcessSandbox:
         if env:
             restricted_env.update(env)
 
-        # Build shell command
-        shell = "bash" if shutil.which("bash") else "sh"
-        full_cmd = [shell, "-c", command]
+        # Build shell command (cross-platform)
+        if sys.platform == "win32":
+            # Windows: prefer pwsh, fall back to cmd
+            if shutil.which("pwsh"):
+                shell_cmd = ["pwsh", "-NoProfile", "-Command", command]
+            else:
+                shell_cmd = ["cmd.exe", "/c", command]
+        else:
+            shell = "bash" if shutil.which("bash") else "sh"
+            shell_cmd = [shell, "-c", command]
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                *full_cmd,
+                *shell_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workdir or os.getcwd(),

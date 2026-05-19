@@ -118,9 +118,9 @@ class TestTools:
 
     def test_terminal_tool(self):
         tool = TerminalTool()
-        result = tool.execute_sync("echo hello world", timeout=5)
+        result = tool.execute_sync("echo hello", timeout=5)
         assert result.exit_code == 0
-        assert "hello world" in result.stdout
+        assert "hello" in result.stdout.replace("\r\n", "\n").replace("\r", "\n")
 
     def test_file_read_write(self, tmp_path: Path):
         ft = FileTools(workdir=tmp_path)
