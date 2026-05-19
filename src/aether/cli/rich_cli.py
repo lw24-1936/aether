@@ -25,6 +25,8 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
         border_style="cyan",
     ))
     
+    loop = AgentLoop(config, workdir)
+    
     # Show profile + memory stats (Hermes-style)
     profile_stats = loop.profile.stats()
     mem_stats = loop.memory.stats()
@@ -43,7 +45,6 @@ async def run_rich_cli(config: AetherConfig, workdir: Path) -> None:
     
     console.print("[dim]输入消息开始对话 · /help 查看命令 · /quit 退出[/dim]\n")
 
-    loop = AgentLoop(config, workdir)
     history: list[ChatMessage] = []
 
     try:
