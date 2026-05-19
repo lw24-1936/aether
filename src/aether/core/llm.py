@@ -67,8 +67,8 @@ class LLMClient:
         """Safely close the HTTP client."""
         try:
             await self._http.aclose()
-        except Exception:
-            pass  # Ignore cleanup errors on Windows
+        except BaseException:
+            pass
 
     def _get_api_key(self, provider: str) -> str:
         import os
